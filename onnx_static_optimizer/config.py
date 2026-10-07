@@ -4,7 +4,12 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
+
+# 输入形状的两种写法（见 shape/shape_specializer.py）：
+#   [1, 3, 640, 640]                 完整 shape
+#   {"N": 1, "H": 640, "W": 640}     符号名 -> 具体值
+ShapeSpec = Union[List[int], Dict[str, int]]
 
 
 @dataclass
@@ -16,7 +21,7 @@ class OptimizerConfig:
 
     # ---------------- Pass 1: Input Shape Specialization ----------------
     # {"images": [1, 3, 640, 640]}
-    input_shapes: Dict[str, List[int]] = field(default_factory=dict)
+    input_shapes: Dict[str, ShapeSpec] = field(default_factory=dict)
 
     # ---------------- Pass 2: Shape Inference ----------------
     strict_shape_inference: bool = True

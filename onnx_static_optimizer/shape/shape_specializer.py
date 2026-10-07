@@ -11,14 +11,21 @@
     {"images": {"N": 1, "H": 640, "W": 640}}      # 形式二：符号名映射
 """
 
-from typing import Dict, List, Union
+from typing import Dict, List
 
 from onnx import ModelProto
 
+from ..config import ShapeSpec
 from ..graph.graph_view import GraphView
 from ..passes.base import Pass
 
-ShapeSpec = Union[List[int], Dict[str, int]]
+__all__ = [
+    "ShapeSpec",
+    "resolve_shape_spec",
+    "specialize_input_shape",
+    "InputShapeSpecializationPass",
+    "InputShapeConflict",
+]
 
 
 class InputShapeConflict(ValueError):
@@ -52,10 +59,7 @@ def specialize_input_shape(model: ModelProto,
         tensor_type = inp.type.tensor_type
         shape = tensor_type.shape
 
-        if isinstance(spec, dict):
-            target = _resolve_symbolic(shape, spec, inp.name)
-        else:
-            target = list(spec)
+        target = resolve_shape_spec(shape, spec, inp.name)
 
         if len(target) != len(shape.dim):
             raise ValueError(
@@ -83,6 +87,20 @@ def specialize_input_shape(model: ModelProto,
         changed = True
 
     return changed
+
+
+def resolve_shape_spec(shape, spec: ShapeSpec, name: str) -> List[int]:
+    """把单个输入的 ``ShapeSpec`` 解析成具体维度列表。
+
+    两种形式（见 ``config.ShapeSpec``）都会得到 ``List[int]``：
+    ``[1, 3, 640, 640]`` 原样采用；``{"N": 1, "H": 640}`` 按声明的
+    dim_param / 维度下标替换。无法确定时抛 ``ValueError``。
+
+    ``shape`` 是 onnx ``TensorShapeProto``（``inp.type.tensor_type.shape``）。
+    """
+    if isinstance(spec, dict):
+        return _resolve_symbolic(shape, spec, name)
+    return [int(x) for x in spec]
 
 
 def _resolve_symbolic(shape, spec: Dict[str, int], name: str) -> List[int]:
@@ -135,10 +153,3 @@ class InputShapeSpecializationPass(Pass):
         if changed:
             self.bump("specialized_inputs")
         return changed
-
-
-__all__ = [
-    "specialize_input_shape",
-    "InputShapeSpecializationPass",
-    "InputShapeConflict",
-]
