@@ -157,6 +157,15 @@ python tests/test_pipeline.py
 10 个测试，覆盖：完整流水线、幂等性、已静态模型不被破坏、data-dependent 报告、
 `Shape(start/end)`、输入 shape 冲突报错、以及求值器的算子语义 / 环保护单测。
 
+单个 Pass 的调试入口（按编号或名字挑一个 Pass，看它到底改了什么）：
+
+```bash
+python tests/test_pass.py --list             # 列出全部 Pass
+python tests/test_pass.py 06                 # 跑 Pass 6（默认先跑一遍前置 Pass）
+python tests/test_pass.py 11 --repeat 2      # 跑两遍，验证幂等
+python tests/test_pass.py 06 --model m.onnx -i images=1,3,640,640
+```
+
 ---
 
 ## 已知边界

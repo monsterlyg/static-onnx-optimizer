@@ -26,7 +26,7 @@ def run_shape_inference(model: ModelProto,
                         strict: bool = True,
                         data_prop: bool = True) -> bool:
     """就地合并 shape 推导结果。返回是否发生变更。"""
-    inferred = _infer(model, strict=strict, data_prop=data_prop)
+    inferred = _infer(model, strict=strict, data_prop=data_prop) # ModelProto | None
     if inferred is None and strict:
         # strict 模式在部分真实模型上会直接抛错，降级再试一次
         inferred = _infer(model, strict=False, data_prop=data_prop)

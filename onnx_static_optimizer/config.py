@@ -19,10 +19,9 @@ class OptimizerConfig:
     input_shapes: Dict[str, List[int]] = field(default_factory=dict)
 
     # ---------------- Pass 2: Shape Inference ----------------
-    strict_shape_inference: bool = True
-    # data_prop=True 让 ONNX 尝试推导 Shape/Gather 等算子的输出值，
+    strict_shape_inference: bool = True # 如果推理过程中遇到任何错误，会直接抛出异常，而不是静默停止
     # 是 Pass 3 之后一切工作的起点。
-    data_prop: bool = True
+    data_prop: bool = True # 对少数特定算子启用数据传播，尝试利用 initializer 中的常量数据来计算形状
 
     # ---------------- Pass 3 / 4: 求值器 ----------------
     enable_shape_tensor_evaluation: bool = True

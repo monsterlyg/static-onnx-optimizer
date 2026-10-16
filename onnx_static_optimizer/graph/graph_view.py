@@ -22,7 +22,7 @@ class GraphView:
     """对 ModelProto.graph 的只读视图 + 索引。"""
 
     def __init__(self, model: ModelProto):
-        self.model = model
+        self.model: ModelProto = model
         self.graph: GraphProto = model.graph
         # 由 optimizer 依据 config 设置：True 时 bypass 不重命名 graph output
         self.preserve_output_names = False
