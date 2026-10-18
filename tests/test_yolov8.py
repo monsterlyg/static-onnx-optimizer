@@ -3,8 +3,7 @@ from ultralytics import YOLO
 
 
 if __name__ == "__main__":
-    # model = YOLO("yolov8n.pt")
-    # Export the model to ONNX format
+     # Export the model to ONNX format
     # model.export(format="onnx", dynamic=True, simplify=False)
     # exit()
     result = optimize("yolov8n.onnx", {"images": [1, 3, 640, 640]})
