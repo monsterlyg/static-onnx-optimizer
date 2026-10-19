@@ -196,6 +196,9 @@ def fold_via_ort(graph, node, config, nodes=None,
         sub_model.opset_import.extend(
             [helper.make_opsetid(i.domain, i.version)
              for i in graph.model.opset_import])
+        # 必须继承 IR version：ORT 会以 "Missing model IR version" 拒绝
+        # 一个没有该字段的模型，导致本 Pass 对所有节点静默失败。
+        sub_model.ir_version = graph.model.ir_version
         sub_model.producer_name = "onnx-static-optimizer/ort-fold"
 
         sess = ort.InferenceSession(

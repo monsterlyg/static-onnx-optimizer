@@ -299,7 +299,107 @@ def test_evaluator_cycle_guard():
 
     ev = ShapeTensorEvaluator(GraphView(model))
     assert ev.evaluate("a") is None       # 有环 -> 不可求值，且不挂
-    print("  环上求值安全返回 None")
+    print("  环上安全返回 None")
+
+
+# ======================================================================
+# 回归：多输出节点的**兄弟输出**不能被 Pass 3 吃掉
+# ======================================================================
+@test
+def test_pass3_multi_output_producer_stays_valid():
+    """Split 的两个输出各走一条路，Pass 3 不能只换掉 output[0]。
+
+    ``replace_node_with_constant`` 只认 ``node.output[0]``。若 Pass 3 折叠的是
+    ``output[1]`` 这个 value，会把值写到 ``output[0]`` 名下，兄弟输出直接消失，
+    onnx.checker 报 "input 'b' ... is not output of any previous nodes"。
+    """
+    from onnx import TensorProto, helper
+
+    nodes = [
+        helper.make_node("Shape", ["images"], ["s"]),
+        helper.make_node("Split", ["s"], ["a", "b"], axis=0),   # a=[1], b=[3,8,8]
+        helper.make_node("Cast", ["a"], ["af"], to=TensorProto.FLOAT),
+        helper.make_node("Add", ["af", "one"], ["act"]),        # a 这条必须活着
+        helper.make_node("Reshape", ["y", "b"], ["r"]),         # b 是 shape 参数
+    ]
+    g = helper.make_graph(
+        nodes, "multi_out",
+        [helper.make_tensor_value_info(
+            "images", TensorProto.FLOAT, ["N", 3, "H", "W"]),
+         helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 64])],
+        [helper.make_tensor_value_info("act", TensorProto.FLOAT, ["A"]),
+         helper.make_tensor_value_info("r", TensorProto.FLOAT, ["X", "Y"])],
+        initializer=[helper.make_tensor("one", TensorProto.FLOAT, [1], [1.0])])
+    model = helper.make_model(
+        g, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+
+    result = optimize(model, {"images": [1, 3, 8, 8]})
+    assert result.checker_ok, result.checker_message
+    assert result.numerical_ok is True, result.numerical_message
+    # b 必须仍然有生产者（要么是 Split，要么已被合法地折成 initializer/Constant）
+    gv = GraphView(result.model)
+    producer = gv.producer("b")
+    assert producer is not None or "b" in gv.initializer_map, (
+        f"Split 的兄弟输出 b 凭空消失了；nodes={[n.op_type for n in gv.graph.node]}")
+    print(f"  nodes: {result.nodes_before} -> {result.nodes_after}, "
+          f"checker/numeric 均通过")
+
+
+# ======================================================================
+# 回归：Pass 5 的 ORT 子模型必须有 ir_version
+# ======================================================================
+@test
+def test_pass5_folds_ops_without_handler():
+    """评估器没有 handler 的算子，Pass 5 必须能用 ORT 折掉。
+
+    历史 bug：``fold_via_ort`` 构造子模型时漏了 ``ir_version``，ORT 报
+    "Missing model IR version"，于是每一次折叠都静默失败、Pass 5 形同虚设。
+    """
+    from onnx import TensorProto, helper
+
+    from onnx_static_optimizer.config import OptimizerConfig
+    from onnx_static_optimizer.passes.constant.constant_folding import (
+        ConstantFoldingPass,
+    )
+
+    # Erf 不在 ShapeTensorEvaluator.HANDLERS 里，故 Pass 4 无能为力。
+    nodes = [
+        helper.make_node("MatMul", ["w", "w2"], ["mm"]),
+        helper.make_node("Erf", ["mm"], ["er"]),
+        helper.make_node("Relu", ["x"], ["y"]),
+    ]
+    inits = [
+        helper.make_tensor("w", TensorProto.FLOAT, [3, 3],
+                           list(np.arange(9, dtype=np.float32) / 9)),
+        helper.make_tensor("w2", TensorProto.FLOAT, [3, 3],
+                           list(np.ones((3, 3), dtype=np.float32) / 3)),
+    ]
+    g = helper.make_graph(
+        nodes, "ort_fold",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 3])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 3]),
+         helper.make_tensor_value_info("er", TensorProto.FLOAT, [3, 3])],
+        initializer=inits)
+    model = helper.make_model(
+        g, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+
+    from onnx_static_optimizer.passes.constant.constant_folding import (
+        ort_module,
+    )
+    if ort_module() is None:
+        print("  skipped: onnxruntime 未安装")
+        return
+
+    gv = GraphView(model)
+    p = ConstantFoldingPass(OptimizerConfig())
+    assert p.run(gv), "Pass 5 应当折掉 Erf 子图，实际没有变更"
+    assert p.detail.get("node_folded", 0) >= 1, p.stats()
+    assert "Erf" not in op_counts(model), "Erf 未被折叠"
+    assert "er" in {i.name for i in model.graph.initializer}
+    print(f"  folded: {p.detail}, nodes={[n.op_type for n in model.graph.node]}")
+
 
 
 # ======================================================================

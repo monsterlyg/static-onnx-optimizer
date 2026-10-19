@@ -72,6 +72,14 @@ class ShapeTensorEvaluationPass(Pass):
             node = graph.producer(name)
             if node is None or node.op_type == "Constant":
                 continue
+            # 本 Pass 按单个 value 折叠，而 replace_node_with_constant 只会
+            # 用 node.output[0] 建 Constant。多输出节点（Split 等）走这条路
+            # 会写错名字、并让兄弟输出凭空消失（checker 报 "input 'b' ... is
+            # not output of any previous nodes"）。这类节点交给 Pass 4 ——
+            # 它对所有输出统一写 initializer。
+            if len([o for o in node.output if o]) > 1:
+                self.note("skipped_multi_output")
+                continue
             # 折叠一个 value 会让它的整条上游变成死代码。那些上游也在候选集里，
             # 如果不跳过，同一个子图会被折叠十几次，产出大量马上被 DCE 删掉的
             # 冗余 Constant。这里只折"还有人用"的那个。
@@ -104,7 +112,7 @@ class ShapeTensorEvaluationPass(Pass):
         cone: List[str] = []
         seen: Set[str] = set()
         stack: List[str] = list(roots)
-
+        # 反向 BFS 收集依赖锥
         while stack:
             name = stack.pop()
             if name in seen or not name:
