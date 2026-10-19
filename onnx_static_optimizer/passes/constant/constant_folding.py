@@ -239,6 +239,9 @@ class ConstantFoldingPass(Pass):
     description = "折叠所有输入可求值的节点：先自实现求值器，再用 ORT 兜底"
 
     def run(self, graph) -> bool:
+        if not self.config.enable_constant_propagation:
+            return False
+
         changed = False
         # 同一轮内不要反复对同一个节点起 ORT session。这两个集合只在本
         # 次 run() 内有效 —— 跨轮（PassManager 的收敛循环）重新尝试是
@@ -317,9 +320,6 @@ class ConstantFoldingPass(Pass):
 
     def _fold_locally(self, ev, node, outs):
         """Level 1：自实现求值器。"""
-        if not self.config.enable_constant_propagation:
-            return None, _UNAVAILABLE
-
         results = [ev.evaluate(o) for o in outs]
         if any(v is None for v in results):
             return None, _UNAVAILABLE
