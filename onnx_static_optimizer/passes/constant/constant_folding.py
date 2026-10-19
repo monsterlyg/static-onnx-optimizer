@@ -1,26 +1,38 @@
-"""Pass 5: Constant Folding (Level 2 —— ONNX Runtime 子图执行)。
+"""Pass 4: Constant Folding —— 两级策略。
 
-在 Pass 4 覆盖不到时，用 ONNX Runtime CPU 执行**小子图**来完成折叠。
+折叠"所有输入都能在编译期确定"的节点，产出写入 **initializer**（NPU 编译器
+对 initializer 支持更好，也便于 Pass 15 去重）。
 
-为什么需要它
-------------
-Pass 4 只能折叠自己实现了的算子。像 ``Conv`` 权重 + ``BN`` 这类复杂常量
-计算，自己实现成本太高。ORT 是兜底。
+两级策略
+--------
+Level 1  自实现求值器（``ShapeTensorEvaluator``）
+    快、可控、不依赖外部库，覆盖 shape 类与常见算术算子。遇到不认识的
+    算子返回 None，交给 Level 2。
 
-**关键纪律（文档反复强调）**
+Level 2  ORT 子图执行
+    以某个节点为根、反向抽出**纯常量子图**，单独交给 ORT CPU 执行。
+    用来兜底 Level 1 没有 numpy 实现的算子（``Erf``/``Sin``/``Torch`` 等）。
 
-    不要把整个模型交给 ORT 跑一遍来做 Constant Folding。
+两者的唯一区别是"值从哪来"；候选筛选、体积守卫、落地方式完全一致，
+所以合并在同一个 Pass 里，用 ``_fold_locally`` / ``_fold_with_ort`` 分流。
 
-原因：你无法控制哪些节点被折叠，会破坏后续 Pass 的假设，
-也可能改变数值行为。所以这里只做"以某个节点为根、反向抽出的纯常量子图"，
-子图规模还有硬上限。
+关键纪律
+--------
+不要把整个模型交给 ORT 跑一遍来做 Constant Folding。你无法控制哪些节点
+被折叠，会破坏后续 Pass 的假设，也可能改变数值行为。所以 Level 2 只做
+"以节点为根、反向抽出的纯常量子图"，且子图规模有硬上限。
+
+安全边界
+--------
+* 随机算子（``RandomNormal`` 等）必须排除，否则每次运行结果不同。
+* ``If`` / ``Loop`` / ``Scan`` 的 body 是子图，不能当普通节点折叠。
+* 结果元素数超限时放弃，避免把巨大数据张量折成 initializer。
 """
 
 from collections import deque
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 import numpy as np
-import onnx
 from onnx import ModelProto, helper
 
 from ...graph.graph_editor import add_initializer, remove_node
@@ -31,6 +43,13 @@ from ...shape.shape_evaluator import ShapeTensorEvaluator
 CONTROL_FLOW_OPS = frozenset({"If", "Loop", "Scan"})
 
 _ORT = None          # None=未探测, False=不可用, module=可用
+
+# _resolve 的返回值状态
+_OK = "ok"
+_UNAVAILABLE = "unavailable"      # Level 1 算不出来，可以试 Level 2
+_TOO_LARGE = "too_large"          # 体积超限，两个 Level 都不该再试
+_NOT_CONE = "not_cone"            # 不是纯常量子图，不算失败
+_FAILED = "failed"                # ORT 执行失败（同一轮内不再重试）
 
 
 def ort_module():
@@ -46,7 +65,7 @@ def ort_module():
 
 
 # ----------------------------------------------------------------------
-# 子图抽取
+# Level 2 的支撑：子图抽取
 # ----------------------------------------------------------------------
 def extract_constant_subgraph(graph, root,
                               max_nodes: int) -> Tuple[Optional[List], Optional[List[str]]]:
@@ -197,7 +216,7 @@ def fold_via_ort(graph, node, config, nodes=None,
             [helper.make_opsetid(i.domain, i.version)
              for i in graph.model.opset_import])
         # 必须继承 IR version：ORT 会以 "Missing model IR version" 拒绝
-        # 一个没有该字段的模型，导致本 Pass 对所有节点静默失败。
+        # 一个没有该字段的模型，导致 Level 2 对所有节点静默失败。
         sub_model.ir_version = graph.model.ir_version
         sub_model.producer_name = "onnx-static-optimizer/ort-fold"
 
@@ -213,68 +232,129 @@ def fold_via_ort(graph, node, config, nodes=None,
 
 # ----------------------------------------------------------------------
 class ConstantFoldingPass(Pass):
-    """ORT 兜底折叠。"""
+    """两级常量折叠。"""
 
-    name = "05_constant_folding"
-    priority = 5
-    description = "用 ORT CPU 执行纯常量小子图来完成折叠（Pass 4 的兜底）"
+    name = "04_constant_folding"
+    priority = 4
+    description = "折叠所有输入可求值的节点：先自实现求值器，再用 ORT 兜底"
 
     def run(self, graph) -> bool:
-        if not self.config.enable_ort_folding:
-            return False
-        if ort_module() is None:
-            # 没装 ORT：静默降级，Pass 4 的自实现算子仍然可用
-            self.note("skipped_no_ort")
-            return False
+        changed = False
+        # 同一轮内不要反复对同一个节点起 ORT session。这两个集合只在本
+        # 次 run() 内有效 —— 跨轮（PassManager 的收敛循环）重新尝试是
+        # 正确的，因为上游可能刚被折成了常量。
+        ort_failed: Set[Tuple[str, ...]] = set()
+        noted: Set[Tuple[str, ...]] = set()
 
+        while True:
+            batch = self._collect(graph, ort_failed, noted)
+            if not batch:
+                break
+
+            for node, values, level in batch:
+                outs = [o for o in node.output if o]
+                for name, value in zip(outs, values):
+                    add_initializer(graph, name, np.asarray(value))
+                remove_node(graph, node)
+                self.bump("ort_folded" if level == 2 else "node_folded")
+
+            graph.rebuild()
+            changed = True
+
+        return changed
+
+    # ------------------------------------------------------------------
+    def _collect(self, graph, ort_failed, noted):
+        """扫一遍图，返回 ``[(node, values, level)]``。
+
+        先收集、再统一落地：折叠一个节点可能让下游也可折叠，而边遍历边改图
+        会让索引失效。下一轮 while 会重新扫描。
+        """
         ev = ShapeTensorEvaluator(
             graph, max_elements=self.config.max_constant_elements)
-        max_elements = self.config.max_constant_elements
-        changed = False
+        batch = []
 
         for node in list(graph.graph.node):
-            if node.op_type == "Constant":
-                continue
-            if node.op_type in NEVER_FOLD_OPS or node.op_type in CONTROL_FLOW_OPS:
+            if not self._is_candidate(node):
                 continue
 
             outs = [o for o in node.output if o]
-            if not outs or not any(node.input):
+            key = tuple(outs)
+
+            values, status = self._fold_locally(ev, node, outs)
+            if status == _OK:
+                batch.append((node, values, 1))
+                continue
+            if status == _TOO_LARGE:
                 continue
 
-            # Pass 4 已经能处理的，交给 Pass 4 —— 避免重复工作
-            if all(ev.evaluate(o) is not None for o in outs):
+            if not self.config.enable_ort_folding or key in ort_failed:
                 continue
 
-            # 先抽子图：只有纯常量依赖的才值得起一个 ORT session。
-            # 把"根本不该试"和"试了但失败"分开记，报告才有诊断价值。
-            nodes, init_names = extract_constant_subgraph(
-                graph, node, self.config.ort_max_subgraph_nodes)
-            if not nodes:
-                self.note("skipped_not_constant_cone")
-                continue
-
-            values = fold_via_ort(graph, node, self.config, nodes, init_names)
-            if values is None or len(values) != len(outs):
+            values, status = self._fold_with_ort(graph, node, outs)
+            if status == _OK:
+                batch.append((node, values, 2))
+            elif status == _FAILED:
+                ort_failed.add(key)
                 self.note("ort_fold_failed")
-                continue
-            if any(int(v.size) > max_elements for v in values):
-                self.note("skipped_too_large")
-                continue
+            elif status == _NOT_CONE:
+                if key not in noted:
+                    noted.add(key)
+                    self.note("skipped_not_constant_cone")
 
-            for name, value in zip(outs, values):
-                add_initializer(graph, name, np.asarray(value))
-            remove_node(graph, node)
-            graph.rebuild()
-            ev = ShapeTensorEvaluator(graph, max_elements=max_elements)
-            changed = True
-            self.bump("node_folded")
+        return batch
 
-        return changed
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _is_candidate(node) -> bool:
+        if node.op_type == "Constant":
+            return False
+        if node.op_type in NEVER_FOLD_OPS or node.op_type in CONTROL_FLOW_OPS:
+            return False
+        if not any(node.input):
+            return False          # RandomNormal 之类无输入的算子
+        return bool([o for o in node.output if o])
+
+    def _fold_locally(self, ev, node, outs):
+        """Level 1：自实现求值器。"""
+        if not self.config.enable_constant_propagation:
+            return None, _UNAVAILABLE
+
+        results = [ev.evaluate(o) for o in outs]
+        if any(v is None for v in results):
+            return None, _UNAVAILABLE
+
+        max_elements = self.config.max_constant_elements
+        if any(int(v.size) > max_elements for v in results):
+            self.note("skipped_too_large")
+            return None, _TOO_LARGE
+        return results, _OK
+
+    def _fold_with_ort(self, graph, node, outs):
+        """Level 2：ORT 子图执行兜底。"""
+        if ort_module() is None:
+            self.note("skipped_no_ort")
+            return None, _UNAVAILABLE
+
+        nodes, init_names = extract_constant_subgraph(
+            graph, node, self.config.ort_max_subgraph_nodes)
+        if not nodes:
+            return None, _NOT_CONE
+
+        values = fold_via_ort(graph, node, self.config, nodes, init_names)
+        if values is None or len(values) != len(outs):
+            return None, _FAILED
+
+        max_elements = self.config.max_constant_elements
+        if any(int(np.asarray(v).size) > max_elements for v in values):
+            self.note("skipped_too_large")
+            return None, _TOO_LARGE
+        return values, _OK
 
 
 __all__ = [
     "ConstantFoldingPass",
+    "CONTROL_FLOW_OPS",
     "fold_via_ort",
     "extract_constant_subgraph",
     "ort_module",

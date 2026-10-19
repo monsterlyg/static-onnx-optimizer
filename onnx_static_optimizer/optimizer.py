@@ -33,7 +33,7 @@ from .passes.cleanup import (
     InitializerCleanupPass,
     UnusedValueInfoCleanupPass,
 )
-from .passes.constant import ConstantFoldingPass, ConstantPropagationPass
+from .passes.constant import ConstantFoldingPass
 from .passes.shape import (
     ExpandEliminationPass,
     ReshapeEliminationPass,
@@ -70,7 +70,10 @@ def build_pipeline(config: OptimizerConfig) -> List[Pass]:
         # 完全相同，但产出的是 Constant 节点而非 initializer（NPU 编译器
         # 对后者支持更好）。实测关掉它，最终常量集合逐个数值相等，节点数
         # 反而更少（106 -> 96）。编号留空以保持既有 Pass 编号稳定。
-        ConstantPropagationPass(config),
+        #
+        # 原 Pass 5（ORT 子图折叠）已并入本 Pass：两者的候选筛选、体积守卫、
+        # 落地方式完全一致，唯一区别是"值从哪来"。合并后一次遍历完成两级
+        # 尝试，避免同一节点被扫两次。
         ConstantFoldingPass(config),
         ShapeEliminationPass(config),
         ReshapeEliminationPass(config),

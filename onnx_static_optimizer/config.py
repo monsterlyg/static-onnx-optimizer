@@ -28,12 +28,11 @@ class OptimizerConfig:
     # 是后续所有 Pass 的起点。
     data_prop: bool = True # 对少数特定算子启用数据传播，尝试利用 initializer 中的常量数据来计算形状
 
-    # ---------------- Pass 4 / 5: 常量折叠 ----------------
+    # ---------------- Pass 4: 常量折叠（求值器 + ORT 两级） ----------------
     enable_constant_propagation: bool = True
-
-    # ---------------- Pass 5: ORT 子图折叠 ----------------
+    # Level 2：求值器覆盖不到的算子交给 ORT 执行纯常量小子图
     enable_ort_folding: bool = True
-    # 单次折叠允许的最大子图节点数 / 元素总数，防止误抽大子图
+    # 单次折叠允许的最大子图节点数，防止误抽大子图
     ort_max_subgraph_nodes: int = 64
     ort_max_elements: int = 1 << 22  # 4M elements
 

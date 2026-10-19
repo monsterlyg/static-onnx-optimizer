@@ -331,79 +331,62 @@ class ShapeTensorEvaluationPass(Pass):
 
 ---
 
-## Pass 4: Constant Propagation
+## Pass 4: Constant Folding（两级）
 
-**目标**：把「所有输入都是常量」的节点在编译期算出来。
+**目标**：把「所有输入都能在编译期确定」的节点在编译期算出来，结果写入
+**initializer**。
 
 **覆盖范围**：既处理纯数据常量（输入全是 initializer），也处理 shape 子图
 （输入是数据张量、但 `Shape`/`Size` 只读它的类型，故仍可求值）。这两类在
 求值器眼里没有区别 —— 判据统一为「所有输出都能求值」。
 
-**实现思路**：复用 `ShapeTensorEvaluator`，但遍历对象是**所有节点**：
+**两级策略**（原 Pass 4 与 Pass 5 已合并，它们只差"值从哪来"）：
+
+```
+Level 1: 自实现求值器（ShapeTensorEvaluator）—— 快、可控、覆盖 shape 类
+Level 2: ORT 子图执行                        —— 兜底、覆盖无 handler 的算子
+```
+
+**实现思路**：
 
 ```python
-class ConstantPropagationPass(Pass):
+class ConstantFoldingPass(Pass):
+    name = "04_constant_folding"
+
     def run(self, graph) -> bool:
-        ev = ShapeTensorEvaluator(graph)
-        changed = False
-        # 反复扫描直到本轮无新折叠（因为折叠一个可能让上游也可折叠）
-        while True:
-            round_changed = False
-            for node in list(graph.graph.node):
-                if node.op_type == "Constant":
-                    continue
-                if not node.input:
-                    continue
-                if all(graph.is_initializer(i) or ev.evaluate(i) is not None
-                       for i in node.input if i):
-                    # 所有输入可求值 -> 尝试折叠
-                    outs = [ev.evaluate(o) for o in node.output if o]
-                    if any(o is None for o in outs):
-                        continue
-                    self._fold(graph, node, outs)
-                    round_changed = True
-            changed |= round_changed
-            if not round_changed:
+        while True:                       # 折一个可能让下游也可折
+            batch = self._collect(graph)  # 先收集、再统一落地
+            if not batch:
                 break
-        return changed
+            for node, values, level in batch:
+                for name, value in zip(outs, values):
+                    add_initializer(graph, name, value)
+                remove_node(graph, node)
+            graph.rebuild()
+
+    def _collect(self, graph):
+        for node in graph.graph.node:
+            if not self._is_candidate(node):    # 随机 / 控制流 / 无输入
+                continue
+            values, status = self._fold_locally(ev, node, outs)     # Level 1
+            if status != OK:
+                values, status = self._fold_with_ort(graph, node, outs)  # Level 2
+            ...
 ```
 
-**`_fold` 的实现**：把节点替换成 `Constant`（或直接写入 initializer）。**推荐写入 `initializer`** 而非新建 `Constant` 节点——NPU 编译器对 initializer 支持更好，且便于后续 `InitializerCleanup` 去重。
-
-**注意事项**：
-
-- **不是所有算子都能折叠**：随机算子（`RandomNormal`）、有副作用的算子必须排除。
-- **控制流子图**：`If`/`Loop` 的 body 是子图，不能当普通节点折叠。
-- 折叠后要立刻 `_rebuild()`，否则后续判断用的是旧索引。
-
----
-
-## Pass 5: Constant Folding
-
-**目标**：在 Pass 4 覆盖不到时，用 ONNX Runtime CPU 执行**小子图**来完成折叠。
-
-**为什么需要它**：Pass 4 只能折叠自己实现了的算子。像 `Conv` 权重 + `BN` 这类复杂的常量计算，自己实现成本太高。
-
-**两级策略**：
-
-```
-Level 1: 自实现算子（Pass 4）          —— 快、可控、覆盖 shape 类
-Level 2: ORT 子图执行                  —— 兜底、覆盖复杂算子
-```
-
-**Level 2 实现思路 —— 抽子图 + 单独跑**：
+**Level 2 实现要点 —— 抽子图 + 单独跑**：
 
 ```python
-def fold_via_ort(graph, node) -> "np.ndarray | None":
+def fold_via_ort(graph, node) -> "list[np.ndarray] | None":
     # 1. 以 node 为根，反向收集所有依赖（只含常量/initializer 可达的部分）
-    subgraph = extract_constant_subgraph(graph, node)
+    subgraph = extract_constant_subgraph(graph, node, max_nodes)
     # 2. 把收集到的 initializer 作为 input，node 的 output 作为 output
     sub_model = build_model(subgraph)
+    sub_model.ir_version = graph.model.ir_version   # 漏了这行 ORT 会拒绝加载
     # 3. ORT 只跑这一小块
     sess = ort.InferenceSession(sub_model.SerializeToString(),
                                 providers=["CPUExecutionProvider"])
-    feeds = {init.name: to_numpy(init) for init in subgraph.initializers}
-    return sess.run(None, feeds)
+    return list(sess.run(None, feeds))
 ```
 
 **关键纪律（文档中反复强调）**：
@@ -414,9 +397,12 @@ def fold_via_ort(graph, node) -> "np.ndarray | None":
 
 **注意事项**：
 
+- **不是所有算子都能折叠**：随机算子（`RandomNormal`）、有副作用的算子必须排除。
+- **控制流子图**：`If`/`Loop` 的 body 是子图，不能当普通节点折叠。
 - 抽子图时要**限定范围**：只允许纯常量依赖，遇到非常量输入就停止（该子图不可折叠）。
 - ORT 执行失败要静默降级，不能让整个优化流程崩溃。
-- 建议给 Level 2 加**开关**（默认开，出问题可关）。
+- Level 2 有开关（`enable_ort_folding`，默认开）；ORT 未安装时自动跳过。
+- 折叠后要立刻 `graph.rebuild()`，否则后续判断用的是旧索引。
 
 ---
 
@@ -907,8 +893,7 @@ class InitializerCleanupPass(Pass):
 第一轮（动转静）:
   P1  InputShapeSpecialization
   P2  ShapeInference
-  P4  ConstantPropagation
-  P5  ConstantFolding
+  P4  ConstantFolding（求值器 + ORT 两级）
   P6  ShapeElimination
   P7  ReshapeElimination
   P8  SliceElimination

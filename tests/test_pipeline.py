@@ -95,12 +95,10 @@ def test_yolo_like_full_pipeline():
     detail = result.detail_summary()
     assert detail.get("identity_removed", 0) >= 1, detail
     assert detail.get("transpose_pair_cancelled", 0) >= 1, detail
-    # Shape/Size 具体由 Pass 6 还是 Pass 4 消除，取决于它们谁先看到机会
-    # （Pass 4 在 Pass 6 之前跑）。这里只断言"确实被消除了"，
-    # 真正的验收是上面 op_counts 里已经没有 Shape/Size/Rank。
-    assert detail.get("eliminated_shape", 0) >= 1, detail
-    assert detail.get("eliminated_size", 0) >= 1, detail
-    # 原 Pass 3 已移除，shape 子图统一由 Pass 4 折叠。
+    # Shape/Size 由 Pass 4 折叠还是 Pass 6 消除，取决于谁先看到机会
+    # （Pass 4 在 Pass 6 之前跑，所以现在基本都是 Pass 4 折掉的）。
+    # 这里不限定具体 Pass，真正的验收是上面 op_counts 里已经没有
+    # Shape/Size/Rank。
     assert detail.get("node_folded", 0) >= 1, detail
     assert detail.get("expand_removed", 0) >= 1, detail
 
@@ -349,14 +347,14 @@ def test_multi_output_producer_stays_valid():
 
 
 # ======================================================================
-# 回归：Pass 5 的 ORT 子模型必须有 ir_version
+# 回归：ORT 兜底（原 Pass 5）必须能折掉求值器没有 handler 的算子
 # ======================================================================
 @test
-def test_pass5_folds_ops_without_handler():
-    """评估器没有 handler 的算子，Pass 5 必须能用 ORT 折掉。
+def test_ort_fallback_folds_ops_without_handler():
+    """评估器没有 handler 的算子，必须由 ORT 兜底折掉。
 
     历史 bug：``fold_via_ort`` 构造子模型时漏了 ``ir_version``，ORT 报
-    "Missing model IR version"，于是每一次折叠都静默失败、Pass 5 形同虚设。
+    "Missing model IR version"，于是每一次折叠都静默失败、ORT 兜底形同虚设。
     """
     from onnx import TensorProto, helper
 
@@ -365,7 +363,7 @@ def test_pass5_folds_ops_without_handler():
         ConstantFoldingPass,
     )
 
-    # Erf 不在 ShapeTensorEvaluator.HANDLERS 里，故 Pass 4 无能为力。
+    # Erf 不在 ShapeTensorEvaluator.HANDLERS 里，故 Level 1 无能为力。
     nodes = [
         helper.make_node("MatMul", ["w", "w2"], ["mm"]),
         helper.make_node("Erf", ["mm"], ["er"]),
@@ -396,8 +394,8 @@ def test_pass5_folds_ops_without_handler():
 
     gv = GraphView(model)
     p = ConstantFoldingPass(OptimizerConfig())
-    assert p.run(gv), "Pass 5 应当折掉 Erf 子图，实际没有变更"
-    assert p.detail.get("node_folded", 0) >= 1, p.stats()
+    assert p.run(gv), "ORT 兜底应当折掉 Erf 子图，实际没有变更"
+    assert p.detail.get("ort_folded", 0) >= 1, p.stats()
     assert "Erf" not in op_counts(model), "Erf 未被折叠"
     assert "er" in {i.name for i in model.graph.initializer}
     print(f"  folded: {p.detail}, nodes={[n.op_type for n in model.graph.node]}")

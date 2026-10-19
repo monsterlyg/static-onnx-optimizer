@@ -8,7 +8,7 @@ from .shape import (
     ShapeEliminationPass,
     SliceEliminationPass,
 )
-from .constant import ConstantFoldingPass, ConstantPropagationPass
+from .constant import ConstantFoldingPass
 from .structural import (
     CastSimplifyPass,
     IdentityEliminationPass,
@@ -25,7 +25,6 @@ __all__ = [
     "Pass",
     "PassManager",
     # 动转静核心
-    "ConstantPropagationPass",
     "ConstantFoldingPass",
     "ShapeEliminationPass",
     "ReshapeEliminationPass",

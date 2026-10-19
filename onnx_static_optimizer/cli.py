@@ -63,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-iter", type=int, default=10,
                    help="收敛循环上限（默认 10）")
     p.add_argument("--no-ort-fold", action="store_true",
-                   help="关闭 Pass 5 的 ORT 子图折叠")
+                   help="关闭 Pass 4 的 ORT 兜底（仅用自实现求值器折叠）")
     p.add_argument("--allow-fp16-roundtrip", action="store_true",
                    help="允许删除 FP32→FP16→FP32 的往返 Cast（会改变数值）")
     p.add_argument("--allow-overwrite", action="store_true",

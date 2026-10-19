@@ -22,8 +22,8 @@ PyTorch 导出动态模型时会把"自己算一遍尺寸"的逻辑写进图里�
 pip install onnx numpy onnxruntime
 ```
 
-`onnxruntime` 是可选的：没装时 Pass 5（ORT 子图折叠）会自动跳过，
-自实现的算子折叠仍然可用。
+`onnxruntime` 是可选的：没装时 Pass 4 的 ORT 兜底会自动跳过，
+自实现求值器的算子折叠仍然可用。
 
 ## 快速开始
 
@@ -97,16 +97,17 @@ Numerical equiv:     PASS  (PASS（最大绝对误差 0.000e+00）)
 | -- | -------------------------- | ----------------------------------------- |
 | 01 | Input Shape Specialization | 把用户指定的具体形状写入`graph.input`   |
 | 02 | Shape Inference            | 调用 ONNX 官方推导传播已知 shape          |
-| 04 | Constant Propagation       | 折叠所有输入都是常量的节点（含 shape 子图） |
-| 05 | Constant Folding           | ORT 子图执行兜底（Pass 4 覆盖不到的算子） |
+| 04 | Constant Folding           | 两级折叠：求值器优先，ORT 子图兜底        |
 | 06 | Shape Elimination          | `Shape` / `Size` → 常量              |
 | 07 | Reshape Elimination        | 静态化动态`Reshape`，删除 no-op         |
 | 08 | Slice Elimination          | 静态化动态`Slice`，删除全量切片         |
 | 09 | Expand Elimination         | 静态化动态`Expand`，删除 no-op          |
 
-> `03` 号位留空：原 *Shape Tensor Evaluation* 已移除。它折叠出的常量值与
-> Pass 4 完全相同，但写成 `Constant` 节点而非 initializer（NPU 编译器对后者
-> 支持更好）。实测关掉它，最终常量集合逐个数值相等且节点数更少。
+> `03` / `05` 号位留空：原 *Shape Tensor Evaluation* 与原 *Constant Folding
+> (ORT)* 已分别移除 / 并入 Pass 4。前者折叠出的常量值与 Pass 4 完全相同，
+> 只是写成 `Constant` 节点而非 initializer；后者的候选筛选、体积守卫、落地
+> 方式与 Pass 4 完全一致，唯一区别是"值从哪来"。实测移除 Pass 3 后最终常量
+> 集合逐个数值相等且节点数更少（106 → 96）。
 
 **第二轮 · 图简化**
 
@@ -215,7 +216,7 @@ onnx_static_optimizer/
 ├── passes/
 │   ├── base.py               # Pass / PassManager
 │   ├── shape/                # Pass 6, 7, 8, 9
-│   ├── constant/             # Pass 4, 5
+│   ├── constant/             # Pass 4（求值器 + ORT 两级折叠）
 │   ├── structural/           # Pass 11-14
 │   └── cleanup/              # Pass 10, 15, 16
 ├── analysis/                 # 图统计
