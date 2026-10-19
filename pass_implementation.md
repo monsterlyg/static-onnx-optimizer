@@ -88,7 +88,7 @@ class PassManager:
 
 ### 0.3 Shape Tensor Evaluator —— 全局常量求值器（**核心，先做**）
 
-**为什么先做它**：Pass 3/4/5/6/7/8/9 全部依赖它。它不是一个 Pass，而是一个被复用的**求值引擎**。
+**为什么先做它**：Pass 4/5/6/7/8/9 全部依赖它。它不是一个 Pass，而是一个被复用的**求值引擎**。
 
 **定位**：给定一个 `value_name`，如果它的值可以在编译期确定，就返回一个 `np.ndarray`；否则返回 `None`。
 
@@ -256,13 +256,18 @@ def shape_inference(model, strict=True, data_prop=True) -> bool:
 **注意事项**：
 
 - `data_prop=True` 很重要：它让 ONNX 尝试推导 Shape 类算子的输出值。
-- 官方 Shape Inference **不是万能的**：动态 Reshape、data-dependent 计算推不出来。这正是需要 Pass 3 的原因。
+- 官方 Shape Inference **不是万能的**：动态 Reshape、data-dependent 计算推不出来。这正是需要 Pass 4 的原因。
 - **Shape Inference ≠ 动转静**。它只传播已有信息，不会"猜"出部署 shape。
 - 该 Pass 会被**反复调用**（收敛循环里），所以要能容忍"无变化"并快速返回。
 
 ---
 
 ## Pass 3: Shape Tensor Evaluator 落地
+
+> **已移除（v0.2）。** 本 Pass 折叠出的常量值与 Pass 4 完全相同，但写成
+> `Constant` 节点而非 initializer。实测关掉它：最终常量集合逐个数值相等，
+> 节点数更少（106 → 96），耗时更低。shape 子图统一由 Pass 4 的求值器处理。
+> 本节保留作为设计演进记录。
 
 **目标**：把「求值结果已知的 shape 子图」整体替换为一个 `Constant` 节点。
 
@@ -330,7 +335,9 @@ class ShapeTensorEvaluationPass(Pass):
 
 **目标**：把「所有输入都是常量」的节点在编译期算出来。
 
-**与 Pass 3 的区别**：Pass 3 专攻 shape 子图（输入可能非常量，靠 shape 求值）；Pass 4 处理**纯数据常量**（输入全是常量）。
+**覆盖范围**：既处理纯数据常量（输入全是 initializer），也处理 shape 子图
+（输入是数据张量、但 `Shape`/`Size` 只读它的类型，故仍可求值）。这两类在
+求值器眼里没有区别 —— 判据统一为「所有输出都能求值」。
 
 **实现思路**：复用 `ShapeTensorEvaluator`，但遍历对象是**所有节点**：
 
@@ -425,7 +432,7 @@ Size(X)   →  Constant(1228800)
 Rank(X)   →  Constant(4)
 ```
 
-**实现思路**：这三种算子本质是 Pass 3 的特例，但因为太常见，单独做成 Pass 便于统计与调试。
+**实现思路**：这三种算子本质是 Pass 4 折叠的特例，但因为太常见，单独做成 Pass 便于统计与调试。
 
 ```python
 class ShapeEliminationPass(Pass):
@@ -900,7 +907,6 @@ class InitializerCleanupPass(Pass):
 第一轮（动转静）:
   P1  InputShapeSpecialization
   P2  ShapeInference
-  P3  ShapeTensorEvaluation
   P4  ConstantPropagation
   P5  ConstantFolding
   P6  ShapeElimination
@@ -925,7 +931,7 @@ class InitializerCleanupPass(Pass):
 
 ```
 P6 消除 Shape(X) → X 的链路变死代码 → 需要 P10 DCE
-P3 折叠 shape 子图 → 产生新 Constant → 需要 P4 再次传播
+P4 折叠 shape 子图 → 产生新常量 → 下一轮 P4 再传播一轮
 P7 删除 Reshape   → 上游 Transpose 可能变成 identity → 需要 P13
 ```
 

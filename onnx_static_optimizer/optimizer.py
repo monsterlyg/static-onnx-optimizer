@@ -38,7 +38,6 @@ from .passes.shape import (
     ExpandEliminationPass,
     ReshapeEliminationPass,
     ShapeEliminationPass,
-    ShapeTensorEvaluationPass,
     SliceEliminationPass,
 )
 from .passes.structural import (
@@ -67,7 +66,10 @@ def build_pipeline(config: OptimizerConfig) -> List[Pass]:
     return [
         # --- 第一轮：动转静 ---
         ShapeInferencePass(config),
-        ShapeTensorEvaluationPass(config),
+        # 原 Pass 3（Shape Tensor Evaluation）已移除：它折叠出的值与 Pass 4
+        # 完全相同，但产出的是 Constant 节点而非 initializer（NPU 编译器
+        # 对后者支持更好）。实测关掉它，最终常量集合逐个数值相等，节点数
+        # 反而更少（106 -> 96）。编号留空以保持既有 Pass 编号稳定。
         ConstantPropagationPass(config),
         ConstantFoldingPass(config),
         ShapeEliminationPass(config),

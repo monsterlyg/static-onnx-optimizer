@@ -100,7 +100,8 @@ def test_yolo_like_full_pipeline():
     # 真正的验收是上面 op_counts 里已经没有 Shape/Size/Rank。
     assert detail.get("eliminated_shape", 0) >= 1, detail
     assert detail.get("eliminated_size", 0) >= 1, detail
-    assert detail.get("shape_subgraph_folded", 0) >= 1, detail
+    # 原 Pass 3 已移除，shape 子图统一由 Pass 4 折叠。
+    assert detail.get("node_folded", 0) >= 1, detail
     assert detail.get("expand_removed", 0) >= 1, detail
 
     # --- 节点数确实下降了 ---
@@ -303,15 +304,16 @@ def test_evaluator_cycle_guard():
 
 
 # ======================================================================
-# 回归：多输出节点的**兄弟输出**不能被 Pass 3 吃掉
+# 回归：多输出节点的**兄弟输出**不能被折叠吃掉
 # ======================================================================
 @test
-def test_pass3_multi_output_producer_stays_valid():
-    """Split 的两个输出各走一条路，Pass 3 不能只换掉 output[0]。
+def test_multi_output_producer_stays_valid():
+    """Split 的两个输出各走一条路，折叠时不能只换掉 output[0]。
 
-    ``replace_node_with_constant`` 只认 ``node.output[0]``。若 Pass 3 折叠的是
-    ``output[1]`` 这个 value，会把值写到 ``output[0]`` 名下，兄弟输出直接消失，
+    ``replace_node_with_constant`` 只认 ``node.output[0]``。若按单个 value
+    折叠 ``output[1]``，会把值写到 ``output[0]`` 名下、兄弟输出直接消失，
     onnx.checker 报 "input 'b' ... is not output of any previous nodes"。
+    这是原 Pass 3 的 bug；Pass 3 已移除，本用例继续守 Pass 4 的行为。
     """
     from onnx import TensorProto, helper
 

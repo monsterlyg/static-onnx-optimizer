@@ -97,13 +97,16 @@ Numerical equiv:     PASS  (PASS（最大绝对误差 0.000e+00）)
 | -- | -------------------------- | ----------------------------------------- |
 | 01 | Input Shape Specialization | 把用户指定的具体形状写入`graph.input`   |
 | 02 | Shape Inference            | 调用 ONNX 官方推导传播已知 shape          |
-| 03 | Shape Tensor Evaluation    | 求值 shape 子图，替换为`Constant`       |
-| 04 | Constant Propagation       | 折叠所有输入都是常量的节点                |
+| 04 | Constant Propagation       | 折叠所有输入都是常量的节点（含 shape 子图） |
 | 05 | Constant Folding           | ORT 子图执行兜底（Pass 4 覆盖不到的算子） |
 | 06 | Shape Elimination          | `Shape` / `Size` → 常量              |
 | 07 | Reshape Elimination        | 静态化动态`Reshape`，删除 no-op         |
 | 08 | Slice Elimination          | 静态化动态`Slice`，删除全量切片         |
 | 09 | Expand Elimination         | 静态化动态`Expand`，删除 no-op          |
+
+> `03` 号位留空：原 *Shape Tensor Evaluation* 已移除。它折叠出的常量值与
+> Pass 4 完全相同，但写成 `Constant` 节点而非 initializer（NPU 编译器对后者
+> 支持更好）。实测关掉它，最终常量集合逐个数值相等且节点数更少。
 
 **第二轮 · 图简化**
 
@@ -123,8 +126,8 @@ Numerical equiv:     PASS  (PASS（最大绝对误差 0.000e+00）)
 | 16 | Unused ValueInfo Cleanup | 删除悬空的 value_info 条目 |
 
 > **为什么要循环**：单个 Pass 常常会解锁上游的新机会。例如 `Pass 6` 消掉
-> `Shape(X)` 后 `X` 的链路变成死代码，需要 `Pass 10` 清掉；`Pass 3` 折叠
-> shape 子图产生新 `Constant`，需要 `Pass 4` 再传播一轮。
+> `Shape(X)` 后 `X` 的链路变成死代码，需要 `Pass 10` 清掉；某轮折叠出新常量
+> 后，下一轮 `Pass 4` 可能又能继续传播。
 
 ---
 
@@ -211,7 +214,7 @@ onnx_static_optimizer/
 │   └── shape_inference.py    # Pass 2
 ├── passes/
 │   ├── base.py               # Pass / PassManager
-│   ├── shape/                # Pass 3, 6, 7, 8, 9
+│   ├── shape/                # Pass 6, 7, 8, 9
 │   ├── constant/             # Pass 4, 5
 │   ├── structural/           # Pass 11-14
 │   └── cleanup/              # Pass 10, 15, 16

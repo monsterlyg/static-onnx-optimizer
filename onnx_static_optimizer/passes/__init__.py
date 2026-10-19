@@ -1,4 +1,4 @@
-"""Pass 基类、PassManager 与 15 个 Pass 的导出。"""
+"""Pass 基类、PassManager 与全部 Pass 的导出。"""
 
 from .base import Pass, PassManager
 
@@ -6,7 +6,6 @@ from .shape import (
     ExpandEliminationPass,
     ReshapeEliminationPass,
     ShapeEliminationPass,
-    ShapeTensorEvaluationPass,
     SliceEliminationPass,
 )
 from .constant import ConstantFoldingPass, ConstantPropagationPass
@@ -26,7 +25,6 @@ __all__ = [
     "Pass",
     "PassManager",
     # 动转静核心
-    "ShapeTensorEvaluationPass",
     "ConstantPropagationPass",
     "ConstantFoldingPass",
     "ShapeEliminationPass",

@@ -25,11 +25,10 @@ class OptimizerConfig:
 
     # ---------------- Pass 2: Shape Inference ----------------
     strict_shape_inference: bool = True # 如果推理过程中遇到任何错误，会直接抛出异常，而不是静默停止
-    # 是 Pass 3 之后一切工作的起点。
+    # 是后续所有 Pass 的起点。
     data_prop: bool = True # 对少数特定算子启用数据传播，尝试利用 initializer 中的常量数据来计算形状
 
-    # ---------------- Pass 3 / 4: 求值器 ----------------
-    enable_shape_tensor_evaluation: bool = True
+    # ---------------- Pass 4 / 5: 常量折叠 ----------------
     enable_constant_propagation: bool = True
 
     # ---------------- Pass 5: ORT 子图折叠 ----------------
