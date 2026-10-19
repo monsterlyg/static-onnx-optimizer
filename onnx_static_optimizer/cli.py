@@ -15,20 +15,20 @@
 
 import argparse
 import sys
-from typing import Dict, List, Union
+from typing import Dict
 
 from .analysis.graph_statistics import analyze, dynamic_op_names
-from .config import OptimizerConfig
+from .config import OptimizerConfig, ShapeSpec
 from .optimizer import optimize
 
 
-def parse_input_shapes(items) -> Dict[str, Union[List[int], Dict[str, int]]]:
+def parse_input_shapes(items) -> Dict[str, ShapeSpec]:
     """解析 ``-i`` 参数。
 
     ``images=1,3,640,640``    -> [1, 3, 640, 640]
     ``images=N:1,H:640,W:640`` -> {"N": 1, "H": 640, "W": 640}
     """
-    shapes: Dict[str, Union[List[int], Dict[str, int]]] = {}
+    shapes: Dict[str, ShapeSpec] = {}
     for item in items or []:
         if "=" not in item:
             raise ValueError(f"输入形状格式错误：{item!r}（缺少 '='）")
@@ -79,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
 
+    input_shapes = None
     try:
         input_shapes = parse_input_shapes(args.input_shape)
     except ValueError as exc:

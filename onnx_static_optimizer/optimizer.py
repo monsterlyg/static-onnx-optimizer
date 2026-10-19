@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Union
 from onnx import ModelProto
 
 from .analysis.graph_statistics import analyze
-from .config import OptimizerConfig
+from .config import OptimizerConfig, ShapeSpec
 from .graph.graph_editor import topological_sort
 from .graph.graph_view import GraphView
 from .passes.base import Pass, PassManager
@@ -48,7 +48,7 @@ from .passes.structural import (
     TransposeSimplifyPass,
 )
 from .shape.shape_inference import ShapeInferencePass, run_shape_inference
-from .shape.shape_specializer import specialize_input_shape
+from .shape.shape_specializer import resolve_shape_spec, specialize_input_shape
 from .validation.checker import (
     check_model,
     static_input_shapes,
@@ -100,7 +100,10 @@ class OptimizationResult:
     converged: bool = False
     pass_stats: List[dict] = field(default_factory=list)
     stalled_passes: List[str] = field(default_factory=list)
-    validation: Optional[StaticValidationReport] = None
+    # optimize() 总会填充该字段；这里给一个空报告作为默认值，
+    # 使类型保持非 Optional，调用方无需再做 None 判空。
+    validation: StaticValidationReport = field(
+        default_factory=StaticValidationReport)
     checker_ok: bool = False
     checker_message: str = ""
     numerical_ok: Optional[bool] = None
@@ -119,7 +122,11 @@ class OptimizationResult:
 
     @property
     def is_static(self) -> bool:
-        return bool(self.validation and self.validation.is_static)
+        return self.validation.is_static
+
+    def format(self) -> str:
+        """返回验证报告的格式化字符串。"""
+        return self.validation.format()
 
     def detail_summary(self) -> Dict[str, int]:
         """聚合各 Pass 的**真实变更**计数。"""
@@ -164,9 +171,8 @@ class OptimizationResult:
         lines.append("")
 
         # --- 静态性 ---
-        if self.validation is not None:
-            lines.append(self.validation.format())
-            lines.append("")
+        lines.append(self.validation.format())
+        lines.append("")
 
         # --- 简化统计 ---
         detail = self.detail_summary()
@@ -269,8 +275,30 @@ def _describe_input_shape(model) -> Dict[str, str]:
     return out
 
 
+def _resolve_config_shapes(model,
+                           specs: Dict[str, ShapeSpec]) -> Dict[str, List[int]]:
+    """把配置里的 ``ShapeSpec`` 解析成 ``{输入名: [具体维度]}``。
+
+    ``static_input_shapes`` 拿不到完整静态 shape 时的兜底：符号名映射
+    按原模型声明的维度解析，保证交给数值验证的一定是 ``List[int]``
+    （``make_feeds`` 会 ``list(input_shapes[name])``，字典形式会被误读）。
+    解析不出来的输入直接跳过，由 ``make_feeds`` 报"输入 shape 未完全静态"。
+    """
+    shapes: Dict[str, List[int]] = {}
+    for inp in model.graph.input:
+        spec = specs.get(inp.name)
+        if spec is None or not inp.type.HasField("tensor_type"):
+            continue
+        try:
+            shapes[inp.name] = resolve_shape_spec(
+                inp.type.tensor_type.shape, spec, inp.name)
+        except (ValueError, KeyError):
+            continue
+    return shapes
+
+
 def optimize(model: Union[str, ModelProto],
-             input_shapes: Optional[Dict[str, list]] = None,
+             input_shapes: Optional[Dict[str, ShapeSpec]] = None,
              config: Optional[OptimizerConfig] = None) -> OptimizationResult:
     """把动态 ONNX 模型静态化。
 
@@ -319,7 +347,7 @@ def optimize(model: Union[str, ModelProto],
     # ------------------------------------------------------------------
     manager = PassManager(build_pipeline(config),
                           max_iter=config.max_iterations)
-    manager._verbose = config.verbose
+    # manager._verbose = config.verbose
     manager.run_until_converged(graph)
 
     result.iterations = manager.iterations
@@ -350,7 +378,8 @@ def optimize(model: Union[str, ModelProto],
     result.checker_ok, result.checker_message = check_model(working)
 
     if config.validate_numerically:
-        shapes = static_input_shapes(working) or dict(config.input_shapes)
+        shapes = static_input_shapes(working) or _resolve_config_shapes(
+            original, config.input_shapes)
         try:
             ok, msg = validate_numerically(
                 original, working, shapes,

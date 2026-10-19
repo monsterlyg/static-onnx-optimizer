@@ -51,6 +51,19 @@ def op_counts(model):
     return counts
 
 
+def evaluated(ev, name):
+    """求值并断言一定成功，返回 ndarray。
+
+    ``ShapeTensorEvaluator.evaluate`` 的返回类型是 ``Optional[np.ndarray]``
+    （不可求值返回 None，这是刻意设计），因此不能直接对结果取成员。
+    这里显式断言，既消除 reportOptionalMemberAccess，也让"本该能求值却
+    返回 None"的失败信息更清晰。
+    """
+    value = ev.evaluate(name)
+    assert value is not None, f"{name} 应当可求值，实际返回 None"
+    return value
+
+
 # ======================================================================
 @test
 def test_yolo_like_full_pipeline():
@@ -65,7 +78,7 @@ def test_yolo_like_full_pipeline():
 
     # --- 静态性 ---
     assert result.is_static, (
-        "仍有动态项：\n" + result.validation.format())
+        "仍有动态项：\n" + result.format())
 
     # --- 数值等价 ---
     assert result.numerical_ok is True, (
@@ -152,7 +165,7 @@ def test_shape_start_end():
     model = build_shape_start_end_model()
     result = optimize(model, {"images": [1, 3, 8, 8]})
     assert result.checker_ok, result.checker_message
-    assert result.is_static, result.validation.format()
+    assert result.is_static, result.format()
     assert result.numerical_ok is True, result.numerical_message
     # Shape(start=2, end=4) -> [8, 8]
     counts = op_counts(result.model)
@@ -232,14 +245,14 @@ def test_evaluator_op_semantics():
     model.ir_version = 8
 
     ev = ShapeTensorEvaluator(GraphView(model))
-    assert ev.evaluate("g").tolist() == [4, 5]
-    assert ev.evaluate("m").tolist() == [8, 10]
-    assert ev.evaluate("c").tolist() == [-1, 8, 10]
-    assert ev.evaluate("u").shape == (1, 3)
-    assert ev.evaluate("s").tolist() == [-1, 8, 10]
-    assert ev.evaluate("sl").tolist() == [3, 4]
-    assert ev.evaluate("cf").tolist() == [-1.0, 8.0, 10.0]
-    assert ev.evaluate("dv").tolist() == [4, 5]
+    assert evaluated(ev, "g").tolist() == [4, 5]
+    assert evaluated(ev, "m").tolist() == [8, 10]
+    assert evaluated(ev, "c").tolist() == [-1, 8, 10]
+    assert evaluated(ev, "u").shape == (1, 3)
+    assert evaluated(ev, "s").tolist() == [-1, 8, 10]
+    assert evaluated(ev, "sl").tolist() == [3, 4]
+    assert evaluated(ev, "cf").tolist() == [-1.0, 8.0, 10.0]
+    assert evaluated(ev, "dv").tolist() == [4, 5]
     # 不存在的名字 -> None，且要缓存住
     assert ev.evaluate("does_not_exist") is None
     assert "does_not_exist" in ev.memo
@@ -260,7 +273,7 @@ def test_evaluator_shape_of_non_constant():
     model.ir_version = 8
 
     ev = ShapeTensorEvaluator(GraphView(model))
-    assert ev.evaluate("s").tolist() == [1, 3, 8, 8]
+    assert evaluated(ev, "s").tolist() == [1, 3, 8, 8]
     # 而数据张量本身必须求不出来
     assert ev.evaluate("x") is None
     print("  Shape(非 const) 求值正确；x 本身正确返回 None")
