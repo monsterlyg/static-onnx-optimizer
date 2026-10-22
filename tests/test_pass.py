@@ -261,11 +261,27 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# Pass 1: Input Shape Specialization
+# Pass 2: Shape Inference
+# Pass 3: 删除
+# Pass 4: Constant Propagation
+# Pass 5: Constant Folding
+# Pass 6: Shape / Size / Rank Elimination
+# Pass 7: Dynamic Reshape Elimination
+# Pass 8: Dynamic Slice Elimination
+# Pass 9: Dynamic Expand Elimination
+# Pass 10: Dead Code Elimination (DCE)
+# Pass 11: Identity Elimination
+# Pass 12: Reshape Simplification
+# Pass 13: Transpose Simplification
+# Pass 14: Cast Simplification
+# Pass 15: Initializer Cleanup
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    args.pass_name = '2' # shape inference pass
-    args.input_shape = ["speech=1,80,400"]  # Must be a list for parse_input_shapes
-    args.model = R"D:\study_and_work\Honghe\onnx-static-optimizer\assets\fsmn-vad\model.onnx"
+    args.pass_name = '3' # shape tensor evaluation pass
+    args.input_shape = ["x=1,8,560", "x_length=1", "language=1", "text_norm=1"]  # Must be a list for parse_input_shapes
+    args.model = R"D:\study_and_work\Honghe\onnx-static-optimizer\assets\sensevoice_slice\slice_0_extracted.onnx"
 
     if args.list:
         passes = build_all_passes(OptimizerConfig())

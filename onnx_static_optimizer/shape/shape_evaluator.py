@@ -33,6 +33,7 @@ from onnx import numpy_helper
 
 from ..graph.node_utils import get_attr, has_attr
 from ..graph.tensor_utils import onnx_dtype_to_numpy
+from ..graph.graph_view import GraphView
 
 
 class ShapeTensorEvaluator:
@@ -44,7 +45,7 @@ class ShapeTensorEvaluator:
     # 读类型不读值的算子，必须短路
     SHAPE_READERS = frozenset({"Shape", "Size", "Rank"})
 
-    def __init__(self, graph, trace: Optional[list] = None,
+    def __init__(self, graph: GraphView, trace: Optional[list] = None,
                  max_elements: int = 1 << 22):
         self.graph = graph
         self.memo: Dict[str, Optional[np.ndarray]] = {}
@@ -57,7 +58,17 @@ class ShapeTensorEvaluator:
     # 主递归
     # ------------------------------------------------------------------
     def evaluate(self, name: str) -> Optional[np.ndarray]:
-        """求值一个 value。不可求值返回 None（并缓存该结论）。"""
+        """对指定 value 做编译期常量求值，结果按 value 名记忆化。
+
+        命中缓存直接返回；遇到环（如 Loop 子图）时剪枝并缓存 None。返回 None
+        表示「已判定不可求值」，后续访问同样命中缓存，不会重复递归。
+
+        Args:
+            name: 待求值的 value 名；空字符串视为非法输入。
+
+        Returns:
+            能在编译期确定的常量数组；无法确定时返回 None。
+        """
         if not name:
             return None
 

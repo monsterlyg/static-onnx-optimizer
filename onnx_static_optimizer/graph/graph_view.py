@@ -63,6 +63,7 @@ class GraphView:
     # ------------------------------------------------------------------
     # 查询
     # ------------------------------------------------------------------
+    # 由 name 查生产者，查到的是 NodeProto
     def producer(self, name: str) -> Optional[NodeProto]:
         return self.producer_map.get(name)
 

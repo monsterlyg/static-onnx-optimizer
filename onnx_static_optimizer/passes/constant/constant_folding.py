@@ -36,6 +36,7 @@ import numpy as np
 from onnx import ModelProto, helper
 
 from ...graph.graph_editor import add_initializer, remove_node
+from ...graph.graph_view import GraphView
 from ...graph.node_utils import NEVER_FOLD_OPS
 from ...passes.base import Pass
 from ...shape.shape_evaluator import ShapeTensorEvaluator
@@ -71,11 +72,23 @@ def extract_constant_subgraph(graph, root,
                               max_nodes: int) -> Tuple[Optional[List], Optional[List[str]]]:
     """以 root 为根反向收集纯常量子图。
 
-    返回 ``(nodes_in_topo_order, initializer_names)``；不是纯常量子图则返回
-    ``(None, None)``。
+    从 root 沿输入边反向遍历，收集所有输入可由 initializer 与 Constant
+    节点确定的节点；遇控制流/禁止折叠算子、悬空输入或节点数超限时判定
+    不是纯常量子图。
+
+    Args:
+        graph: ONNX 图对象，用于查询 initializer 与节点的生产者。
+        root: 作为子图根的待折叠 ONNX 节点。
+        max_nodes: 子图节点数硬上限，超过即判定失败。
+
+    Returns:
+        二元组 ``(nodes_in_topo_order, initializer_names)``：成功时为拓扑
+        序排列的子图节点列表与依赖的 initializer 名列表；不是纯常量子图
+        （含控制流/禁止折叠算子、悬空输入、节点超限或子图有环）时返回
+        ``(None, None)``。
     """
     needed = []
-    seen = set()
+    seen = set() # 	一个节点可能同时喂给子图里的多个消费者，追到第二次时直接跳过，避免重复收集和死循环
     init_names: List[str] = []
     init_seen = set()
     stack = [root]
@@ -87,6 +100,7 @@ def extract_constant_subgraph(graph, root,
             continue
         seen.add(key)
 
+        # If/Loop 的行为依赖运行期数据，随机算子每次结果不同——折叠它们会改变模型语义，宁可不算
         if node.op_type in CONTROL_FLOW_OPS or node.op_type in NEVER_FOLD_OPS:
             return None, None
         if node.op_type == "Constant":
@@ -107,12 +121,13 @@ def extract_constant_subgraph(graph, root,
                     init_names.append(inp)
                 continue
             producer = graph.producer(inp)
-            if producer is None:
+            if producer is None: # 这个名字既不是权重也没人生产它，只能是模型输入
                 return None, None           # 悬空 -> 不是纯常量子图
             stack.append(producer)
 
-    # 按原图顺序过滤，保证拓扑序
+    # 里面装的是——刚才反向追问时收集到的每个节点（needed）的“输出张量名列表”（转成元组）。
     keys = {tuple(o for o in n.output if o) for n in needed}
+    # 从头到尾走一遍原图节点表，按原图本来的顺序把名单上的节点捞出来
     ordered = [n for n in graph.graph.node
                if tuple(o for o in n.output if o) in keys]
 
@@ -123,8 +138,8 @@ def extract_constant_subgraph(graph, root,
 
 
 def _local_toposort(nodes: List) -> Optional[List]:
-    """对给定节点子集做拓扑排序，有环返回 None。"""
-    produced = {}
+    """对给定节点子集做拓扑排序，有环返回 None。 Kahn 算法"""
+    produced = {} # 张量名/边 -> 节点索引; 由'边'找到产生这个'边'的节点索引
     for i, n in enumerate(nodes):
         for o in n.output:
             if o:
@@ -133,6 +148,7 @@ def _local_toposort(nodes: List) -> Optional[List]:
     indeg = [0] * len(nodes)
     succ: List[List[int]] = [[] for _ in nodes]
     for i, n in enumerate(nodes):
+        # 由当前节点的 输入边/张量，反向查到它的生产者节点索引，顺便统计入度
         deps = {produced[x] for x in n.input
                 if x and x in produced and produced[x] != i}
         indeg[i] = len(deps)
@@ -238,7 +254,7 @@ class ConstantFoldingPass(Pass):
     priority = 4
     description = "折叠所有输入可求值的节点：先自实现求值器，再用 ORT 兜底"
 
-    def run(self, graph) -> bool:
+    def run(self, graph: GraphView) -> bool:
         if not self.config.enable_constant_propagation:
             return False
 
@@ -268,10 +284,25 @@ class ConstantFoldingPass(Pass):
 
     # ------------------------------------------------------------------
     def _collect(self, graph, ort_failed, noted):
-        """扫一遍图，返回 ``[(node, values, level)]``。
+        """扫描整张图，收集本轮所有可折叠的节点。
+
+        对每个候选节点先尝试 Level 1（自实现求值器），算不出来且未超限时
+        再走 Level 2（ORT 子图执行），并把结果汇总成待落地的批次。
 
         先收集、再统一落地：折叠一个节点可能让下游也可折叠，而边遍历边改图
         会让索引失效。下一轮 while 会重新扫描。
+
+        Args:
+            graph: ONNX 图对象，提供 ``graph.graph.node`` 及 initializer 信息。
+            ort_failed: 本次 ``run()`` 内 ORT 折叠失败的输出名元组集合，
+                命中则本轮不再重试该节点。
+            noted: 已记录过 ``skipped_not_constant_cone`` 的输出名元组集合，
+                用于避免同一原因重复计数。
+
+        Returns:
+            ``list[tuple[node, list[numpy.ndarray], int]]``，每项依次为待折叠
+            节点、其各输出的常量值、来源层级（1 表示自实现求值器，2 表示
+            ORT 子图执行）。本轮无可折叠节点时返回空列表。
         """
         ev = ShapeTensorEvaluator(
             graph, max_elements=self.config.max_constant_elements)
@@ -310,6 +341,15 @@ class ConstantFoldingPass(Pass):
     # ------------------------------------------------------------------
     @staticmethod
     def _is_candidate(node) -> bool:
+        """判断节点是否值得尝试常量折叠。
+
+        Args:
+            node: ONNX 图中的待检查节点。
+
+        Returns:
+            节点可参与常量折叠时返回 True；Constant 节点、禁止折叠算子、
+            控制流算子、无输入算子以及无有效输出的节点返回 False。
+        """
         if node.op_type == "Constant":
             return False
         if node.op_type in NEVER_FOLD_OPS or node.op_type in CONTROL_FLOW_OPS:
@@ -319,7 +359,19 @@ class ConstantFoldingPass(Pass):
         return bool([o for o in node.output if o])
 
     def _fold_locally(self, ev, node, outs):
-        """Level 1：自实现求值器。"""
+        """使用 Level 1 的自实现求值器对节点做常量折叠。
+
+        Args:
+            ev: 自实现求值器实例，提供按输出名求值的 ``evaluate`` 方法。
+            node: 待折叠的 ONNX 节点。
+            outs: 该节点的输出名列表。
+
+        Returns:
+            二元组 ``(results, status)``：折叠成功时为 (各输出求值结果, _OK)；
+            求值器无法算出任一输出时为 (None, _UNAVAILABLE)，可继续尝试 Level 2；
+            结果元素总数超过 ``max_constant_elements`` 时为 (None, _TOO_LARGE)，
+            此时同时记录 ``skipped_too_large`` 统计，不应再尝试 Level 2。
+        """
         results = [ev.evaluate(o) for o in outs]
         if any(v is None for v in results):
             return None, _UNAVAILABLE
@@ -331,7 +383,26 @@ class ConstantFoldingPass(Pass):
         return results, _OK
 
     def _fold_with_ort(self, graph, node, outs):
-        """Level 2：ORT 子图执行兜底。"""
+        """使用 Level 2 的 ORT 子图执行为节点做常量折叠兜底。
+
+        以 ``node`` 为根反向抽取纯常量子图（规模不超过
+        ``ort_max_subgraph_nodes``），交给 ORT CPU 执行，覆盖 Level 1
+        求值器未实现的算子。
+
+        Args:
+            graph: ONNX 图对象，用于抽取常量子图并读取 initializer。
+            node: 待折叠的 ONNX 节点，作为常量子图的根。
+            outs: 该节点的输出名列表。
+
+        Returns:
+            二元组 ``(values, status)``：ORT 执行成功且元素数未超限时为
+            (各输出求值结果, _OK)；onnxruntime 不可用时为 (None, _UNAVAILABLE)，
+            同时记录 ``skipped_no_ort`` 统计；抽不出纯常量子图时为
+            (None, _NOT_CONE)，不算失败；ORT 执行失败或输出数不匹配时为
+            (None, _FAILED)，同一轮内不应重试；结果元素数超过
+            ``max_constant_elements`` 时为 (None, _TOO_LARGE)，同时记录
+            ``skipped_too_large`` 统计。
+        """
         if ort_module() is None:
             self.note("skipped_no_ort")
             return None, _UNAVAILABLE
